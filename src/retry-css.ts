@@ -1,5 +1,5 @@
 import { arrayFrom, stringReplace, toSlug, supportRules, getCssRules } from './util'
-import { doc, domainProp, onRetryProp, StyleElementCtor } from './constants'
+import { win, doc, domainProp, onRetryProp, StyleElementCtor } from './constants'
 import { getCurrentDomain, DomainMap } from './url'
 import { InnerAssetsRetryOptions } from './assets-retry'
 
@@ -8,6 +8,10 @@ type UrlProperty = 'backgroundImage' | 'borderImage' | 'listStyleImage'
 const handledStylesheets: { [x: string]: boolean } = {}
 // cache for <style />
 const handledStyleTags: HTMLStyleElement[] = []
+
+const insertRule = win.CSSStyleSheet.prototype.insertRule
+
+const urlProperties: UrlProperty[] = ['backgroundImage', 'borderImage', 'listStyleImage']
 
 const processRules = function(
     name: UrlProperty,
@@ -43,14 +47,13 @@ const processRules = function(
         .join(',')
     const cssText = rule.selectorText + `{ ${toSlug(name)}: ${urlList} !important; }`
     try {
-        styleSheet.insertRule(cssText, styleRules.length)
+        insertRule.call(styleSheet, cssText, styleRules.length)
     } catch (_) {
-        styleSheet.insertRule(cssText, 0)
+        insertRule.call(styleSheet, cssText, 0)
     }
 }
 
 const processStyleSheets = (styleSheets: CSSStyleSheet[], opts: InnerAssetsRetryOptions) => {
-    const urlProperties: UrlProperty[] = ['backgroundImage', 'borderImage', 'listStyleImage']
     styleSheets.forEach((styleSheet: CSSStyleSheet) => {
         const rules = getCssRules(styleSheet)
         if (rules === null) {
@@ -84,6 +87,10 @@ const getStyleSheetsToBeHandled = (styleSheets: StyleSheetList, domainMap: Domai
             if (ownerNode instanceof StyleElementCtor && handledStyleTags.indexOf(ownerNode) > -1) {
                 return false
             }
+            // use CSSStyleSheet.insertRule
+            if (ownerNode instanceof StyleElementCtor && !ownerNode.innerHTML) {
+                return false
+            }
             return true
         }
         if (handledStylesheets[styleSheet.href]) {
@@ -94,11 +101,30 @@ const getStyleSheetsToBeHandled = (styleSheets: StyleSheetList, domainMap: Domai
     })
 }
 
+const setInsertRuleHandle = (opts: InnerAssetsRetryOptions) => {
+    win.CSSStyleSheet.prototype.insertRule = function (rule, index) {
+        const insertIndex = insertRule.call(this, rule, index)
+        const styleSheet = this
+        const rules = getCssRules(styleSheet)
+        if (rules === null) {
+            return insertIndex
+        }
+        const styleRules = arrayFrom(rules) as CSSStyleRule[]
+        urlProperties.forEach(cssProperty => {
+            processRules(cssProperty, styleRules[insertIndex], styleSheet, styleRules, opts)
+        })
+        return index || 0
+    }
+}
+
 export default function initCss(opts: InnerAssetsRetryOptions) {
     // detect is support styleSheets
     const supportStyleSheets = doc.styleSheets
     const domainMap = opts[domainProp]
     if (!supportStyleSheets) return false
+
+    setInsertRuleHandle(opts)
+
     setInterval(() => {
         const newStyleSheets = getStyleSheetsToBeHandled(doc.styleSheets, domainMap)
         if (newStyleSheets.length > 0) {
